@@ -1,0 +1,70 @@
+#!/usr/bin/perl
+
+# based on https://github.com/openjdk/jdk/blob/master/src/jdk.attach/linux/classes/sun/tools/attach/VirtualMachineImpl.java
+
+use strict;
+use utf8;
+use warnings;
+
+use IO::Socket::UNIX;
+
+my ($pid, $cmd, @args) = @ARGV;
+
+my $sock = attach($pid);
+write_string($sock, "1");
+write_string($sock, $cmd);
+for my $i (0..2) {
+    write_string($sock, $args[$i] // "");
+}
+my $status = $sock->getline;
+chomp $status;
+if ($status == 0) {
+    print while <$sock>;
+} else {
+    print STDERR "error $status:\n";
+    print STDERR while <$sock>;
+}
+$sock->close;
+
+sub attach {
+    my $pid = $_[0];
+    my $socket_path = "/tmp/.java_pid$pid";
+    unless (-S $socket_path) {
+        my $attach_path = "/tmp/.attach_pid$pid";
+        open my $fh, '>', $attach_path or die_with_errno("could not create $attach_path");
+        close $fh;
+        eval {
+            unless (sigquit_helper($pid, $socket_path)) {
+                die "could not attach\n" unless sigquit_helper($pid, $socket_path);
+            }
+        };
+        unlink $attach_path;
+        die $@ if $@;
+    }
+    my $sock = IO::Socket::UNIX->new(Type => SOCK_STREAM, Peer => $socket_path);
+    die_with_errno("could not connect") unless $sock;
+    return $sock;
+}
+
+sub sigquit_helper {
+    my ($pid, $socket_path) = @_;
+    kill QUIT => $pid or die_with_errno("could not send SIGQUIT to $pid");
+    my $got_socket;
+    for (0..9) {
+        select undef, undef, undef, 0.1;
+        $got_socket = -S $socket_path;
+        last if $got_socket;
+    }
+    return $got_socket;
+}
+
+sub write_string {
+    my ($sock, $string) = @_;
+    $sock->syswrite($string);
+    $sock->syswrite("\0");
+}
+
+sub die_with_errno {
+    my $message = $_[0];
+    die "$message: $! (" . ($! + 0) . ")\n";
+}
